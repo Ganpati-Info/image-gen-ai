@@ -7,7 +7,7 @@ const ALLOWED_ORIGINS = [
   "https://esicgrievance.vercel.app",
 ];
 
-const ALLOWED_IMAGE_HOSTS = ["esic.ganpatinfosolutions.com"];
+const ALLOWED_IMAGE_HOSTS = ["esic.ganpatiinfosolutions.com"];
 
 function getCorsOrigin(request: Request) {
   const origin = request.headers.get("origin");
