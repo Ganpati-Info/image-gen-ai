@@ -2,54 +2,124 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
+const ALLOWED_IMAGE_HOSTS = ["esic.ganpatinfosolutions.com"];
+
+function jsonResponse(data: unknown, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "Access-Control-Allow-Origin": "https://esicgrievance.vercel.app",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    },
+  });
+}
+
+export async function OPTIONS() {
+  return jsonResponse({}, 200);
+}
+
 export async function POST(request: Request) {
   try {
     const apiKey = process.env.GEMINI_API_KEY?.trim();
 
     if (!apiKey) {
-      return NextResponse.json(
+      return jsonResponse(
         {
-          error: "GEMINI_API_KEY is not configured. Add it to .env.local.",
+          error: "GEMINI_API_KEY is not configured.",
         },
-        { status: 500 },
+        500,
       );
     }
 
-    const formData = await request.formData();
+    const body = await request.json();
 
-    const title = String(formData.get("title") ?? "").trim();
-    const description = String(formData.get("description") ?? "").trim();
-    const image = formData.get("image");
+    const title = String(body?.title ?? "").trim();
+    const description = String(body?.description ?? "").trim();
+    const imageUrl = String(body?.imageUrl ?? "").trim();
 
-    if (!title || !description || !(image instanceof File)) {
-      return NextResponse.json(
+    if (!title || !description || !imageUrl) {
+      return jsonResponse(
         {
-          error: "Title, description and image are required.",
+          error: "Title, description and imageUrl are required.",
         },
-        { status: 400 },
+        400,
       );
     }
 
-    if (!image.type.startsWith("image/")) {
-      return NextResponse.json(
+    // Validate image URL
+    let parsedUrl: URL;
+
+    try {
+      parsedUrl = new URL(imageUrl);
+    } catch {
+      return jsonResponse(
         {
-          error: "Only image files are supported.",
+          error: "Invalid image URL.",
         },
-        { status: 400 },
+        400,
       );
     }
 
-    if (image.size > 10 * 1024 * 1024) {
-      return NextResponse.json(
+    if (parsedUrl.protocol !== "https:") {
+      return jsonResponse(
+        {
+          error: "Image URL must use HTTPS.",
+        },
+        400,
+      );
+    }
+
+    if (!ALLOWED_IMAGE_HOSTS.includes(parsedUrl.hostname)) {
+      return jsonResponse(
+        {
+          error: "Image URL is not from an allowed source.",
+        },
+        403,
+      );
+    }
+
+    // Fetch the WordPress image
+    const imageResponse = await fetch(imageUrl, {
+      method: "GET",
+      headers: {
+        Accept: "image/*",
+      },
+    });
+
+    if (!imageResponse.ok) {
+      return jsonResponse(
+        {
+          error: `Unable to fetch source image: ${imageResponse.status}`,
+        },
+        400,
+      );
+    }
+
+    const contentType =
+      imageResponse.headers.get("content-type") || "image/jpeg";
+
+    if (!contentType.startsWith("image/")) {
+      return jsonResponse(
+        {
+          error: "The provided URL does not point to an image.",
+        },
+        400,
+      );
+    }
+
+    const imageBuffer = await imageResponse.arrayBuffer();
+
+    if (imageBuffer.byteLength > 10 * 1024 * 1024) {
+      return jsonResponse(
         {
           error: "Image must be 10 MB or smaller.",
         },
-        { status: 400 },
+        400,
       );
     }
 
-    const bytes = Buffer.from(await image.arrayBuffer());
-    const base64Image = bytes.toString("base64");
+    const base64Image = Buffer.from(imageBuffer).toString("base64");
 
     const prompt = `
 You are an AI visual assistant for a government hospital maintenance system.
@@ -117,13 +187,6 @@ SPECIFIC REQUEST
 
 Show the hospital room after the requested repair work has been completed.
 
-For example, if the image shows:
-- a damaged door, repair or replace the door
-- broken window glass, replace the glass
-- damaged window frame, restore the frame
-- dirty or damaged surrounding surfaces directly related to the repair,
-  restore them appropriately
-
 Do not make unrelated improvements.
 
 The final result should look like the SAME hospital room photographed again
@@ -148,7 +211,7 @@ after the requested repair work has been completed.
             },
             {
               type: "image",
-              mime_type: image.type,
+              mime_type: contentType,
               data: base64Image,
             },
           ],
@@ -165,12 +228,12 @@ after the requested repair work has been completed.
     if (!geminiResponse.ok) {
       console.error("Gemini API error:", geminiResponse.status, responseText);
 
-      return NextResponse.json(
+      return jsonResponse(
         {
           error: `Gemini API error: ${geminiResponse.status}`,
           details: responseText,
         },
-        { status: geminiResponse.status },
+        geminiResponse.status,
       );
     }
 
@@ -179,14 +242,12 @@ after the requested repair work has been completed.
     let generatedImage: string | null = null;
     let generatedText = "";
 
-    // Convenience property
     if (interaction.output_image) {
       generatedImage = `data:${
         interaction.output_image.mime_type || "image/png"
       };base64,${interaction.output_image.data}`;
     }
 
-    // Fallback for model output blocks
     if (!generatedImage) {
       for (const step of interaction.steps ?? []) {
         if (step.type !== "model_output") {
@@ -210,19 +271,19 @@ after the requested repair work has been completed.
     if (!generatedImage) {
       console.error("Gemini response:", interaction);
 
-      return NextResponse.json(
+      return jsonResponse(
         {
           error: "Gemini completed the request but did not return an image.",
         },
-        { status: 502 },
+        502,
       );
     }
 
-    return NextResponse.json({
+    return jsonResponse({
+      success: true,
+
       context:
         generatedText || "Gemini generated the repaired-condition reference.",
-
-      imagePrompt: prompt,
 
       generatedImage,
 
@@ -231,14 +292,14 @@ after the requested repair work has been completed.
   } catch (error) {
     console.error("Gemini reference generation failed:", error);
 
-    return NextResponse.json(
+    return jsonResponse(
       {
         error:
           error instanceof Error
             ? error.message
             : "Gemini image generation failed.",
       },
-      { status: 500 },
+      500,
     );
   }
 }
