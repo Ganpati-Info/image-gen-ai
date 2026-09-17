@@ -2,21 +2,60 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
+const ALLOWED_ORIGINS = [
+  "http://localhost:5173",
+  "https://esicgrievance.vercel.app",
+];
+
 const ALLOWED_IMAGE_HOSTS = ["esic.ganpatinfosolutions.com"];
 
-function jsonResponse(data: unknown, status = 200) {
+function getCorsOrigin(request: Request) {
+  const origin = request.headers.get("origin");
+
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    return origin;
+  }
+
+  return "";
+}
+
+function jsonResponse(request: Request, data: unknown, status = 200) {
+  const origin = getCorsOrigin(request);
+
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  });
+
+  if (origin) {
+    headers.set("Access-Control-Allow-Origin", origin);
+  }
+
   return NextResponse.json(data, {
     status,
-    headers: {
-      "Access-Control-Allow-Origin": "https://esicgrievance.vercel.app",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    },
+    headers,
   });
 }
 
-export async function OPTIONS() {
-  return jsonResponse({}, 200);
+export async function OPTIONS(request: Request) {
+  const origin = getCorsOrigin(request);
+
+  const headers = new Headers({
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  });
+
+  if (origin) {
+    headers.set("Access-Control-Allow-Origin", origin);
+  }
+
+  return new NextResponse(null, {
+    status: 204,
+    headers,
+  });
 }
 
 export async function POST(request: Request) {
@@ -25,6 +64,7 @@ export async function POST(request: Request) {
 
     if (!apiKey) {
       return jsonResponse(
+        request,
         {
           error: "GEMINI_API_KEY is not configured.",
         },
@@ -40,6 +80,7 @@ export async function POST(request: Request) {
 
     if (!title || !description || !imageUrl) {
       return jsonResponse(
+        request,
         {
           error: "Title, description and imageUrl are required.",
         },
@@ -47,13 +88,17 @@ export async function POST(request: Request) {
       );
     }
 
-    // Validate image URL
+    /*
+     * Validate image URL
+     */
+
     let parsedUrl: URL;
 
     try {
       parsedUrl = new URL(imageUrl);
     } catch {
       return jsonResponse(
+        request,
         {
           error: "Invalid image URL.",
         },
@@ -63,6 +108,7 @@ export async function POST(request: Request) {
 
     if (parsedUrl.protocol !== "https:") {
       return jsonResponse(
+        request,
         {
           error: "Image URL must use HTTPS.",
         },
@@ -72,6 +118,7 @@ export async function POST(request: Request) {
 
     if (!ALLOWED_IMAGE_HOSTS.includes(parsedUrl.hostname)) {
       return jsonResponse(
+        request,
         {
           error: "Image URL is not from an allowed source.",
         },
@@ -79,7 +126,10 @@ export async function POST(request: Request) {
       );
     }
 
-    // Fetch the WordPress image
+    /*
+     * Fetch the original evidence image from WordPress
+     */
+
     const imageResponse = await fetch(imageUrl, {
       method: "GET",
       headers: {
@@ -89,6 +139,7 @@ export async function POST(request: Request) {
 
     if (!imageResponse.ok) {
       return jsonResponse(
+        request,
         {
           error: `Unable to fetch source image: ${imageResponse.status}`,
         },
@@ -101,6 +152,7 @@ export async function POST(request: Request) {
 
     if (!contentType.startsWith("image/")) {
       return jsonResponse(
+        request,
         {
           error: "The provided URL does not point to an image.",
         },
@@ -112,6 +164,7 @@ export async function POST(request: Request) {
 
     if (imageBuffer.byteLength > 10 * 1024 * 1024) {
       return jsonResponse(
+        request,
         {
           error: "Image must be 10 MB or smaller.",
         },
@@ -120,6 +173,10 @@ export async function POST(request: Request) {
     }
 
     const base64Image = Buffer.from(imageBuffer).toString("base64");
+
+    /*
+     * AI prompt
+     */
 
     const prompt = `
 You are an AI visual assistant for a government hospital maintenance system.
@@ -193,6 +250,10 @@ The final result should look like the SAME hospital room photographed again
 after the requested repair work has been completed.
 `;
 
+    /*
+     * Send image + prompt to Gemini
+     */
+
     const geminiResponse = await fetch(
       "https://generativelanguage.googleapis.com/v1beta/interactions",
       {
@@ -225,10 +286,15 @@ after the requested repair work has been completed.
 
     const responseText = await geminiResponse.text();
 
+    /*
+     * Gemini error
+     */
+
     if (!geminiResponse.ok) {
       console.error("Gemini API error:", geminiResponse.status, responseText);
 
       return jsonResponse(
+        request,
         {
           error: `Gemini API error: ${geminiResponse.status}`,
           details: responseText,
@@ -242,11 +308,19 @@ after the requested repair work has been completed.
     let generatedImage: string | null = null;
     let generatedText = "";
 
+    /*
+     * Primary image output
+     */
+
     if (interaction.output_image) {
       generatedImage = `data:${
         interaction.output_image.mime_type || "image/png"
       };base64,${interaction.output_image.data}`;
     }
+
+    /*
+     * Fallback model output blocks
+     */
 
     if (!generatedImage) {
       for (const step of interaction.steps ?? []) {
@@ -268,10 +342,15 @@ after the requested repair work has been completed.
       }
     }
 
+    /*
+     * Gemini returned no image
+     */
+
     if (!generatedImage) {
       console.error("Gemini response:", interaction);
 
       return jsonResponse(
+        request,
         {
           error: "Gemini completed the request but did not return an image.",
         },
@@ -279,7 +358,11 @@ after the requested repair work has been completed.
       );
     }
 
-    return jsonResponse({
+    /*
+     * Successful response
+     */
+
+    return jsonResponse(request, {
       success: true,
 
       context:
@@ -293,6 +376,7 @@ after the requested repair work has been completed.
     console.error("Gemini reference generation failed:", error);
 
     return jsonResponse(
+      request,
       {
         error:
           error instanceof Error
